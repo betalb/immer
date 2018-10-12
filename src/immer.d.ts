@@ -3,10 +3,25 @@
 export type DraftObject<T> = {-readonly [P in keyof T]: Draft<T[P]>}
 export interface DraftArray<T> extends Array<Draft<T>> {}
 export type Draft<T> = T extends any[]
-    ? DraftArray<T[number]>
+    ? IsFinite<T> extends true ? DraftObject<T> : DraftArray<T[number]>
     : T extends ReadonlyArray<any>
         ? DraftArray<T[number]>
         : T extends object ? DraftObject<T> : T
+
+export type IsFinite<Tuple extends any[]> = {
+    empty: true
+    nonEmpty: ((..._: Tuple) => any) extends ((
+        _: infer First,
+        ..._1: infer Rest
+    ) => any)
+        ? IsFinite<Rest>
+        : never
+    infinite: false
+}[Tuple extends []
+    ? "empty"
+    : Tuple extends (infer Element)[]
+        ? Element[] extends Tuple ? "infinite" : "nonEmpty"
+        : never]
 
 export interface Patch {
     op: "replace" | "remove" | "add"
