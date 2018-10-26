@@ -12,9 +12,6 @@ import {
     finalize
 } from "./common"
 
-const descriptors = {}
-let states = null
-
 function createState(parent, proxy, base) {
     return {
         modified: false,
@@ -34,14 +31,14 @@ function source(state) {
     return state.hasCopy ? state.copy : state.base
 }
 
-function get(state, prop) {
+function get(state, prop, proxiesStack) {
     assertUnfinished(state)
     const value = source(state)[prop]
     if (!state.finalizing && value === state.base[prop] && isProxyable(value)) {
         // only create a proxy if the value is proxyable, and the value was in the base state
         // if it wasn't in the base state, the object is already modified and we will process it in finalize
         prepareCopy(state)
-        return (state.copy[prop] = createProxy(state, value))
+        return (state.copy[prop] = createProxy(state, value, proxiesStack))
     }
     return value
 }
@@ -71,31 +68,33 @@ function prepareCopy(state) {
 }
 
 // creates a proxy for plain objects / arrays
-function createProxy(parent, base) {
+function createProxy(parent, base, proxiesStack) {
     const proxy = shallowCopy(base)
     each(base, i => {
-        Object.defineProperty(proxy, "" + i, createPropertyProxy("" + i))
+        Object.defineProperty(
+            proxy,
+            "" + i,
+            createPropertyProxy("" + i, proxiesStack)
+        )
     })
     const state = createState(parent, proxy, base)
     createHiddenProperty(proxy, PROXY_STATE, state)
-    states.push(state)
+    proxiesStack.push(state)
     return proxy
 }
 
-function createPropertyProxy(prop) {
-    return (
-        descriptors[prop] ||
-        (descriptors[prop] = {
-            configurable: true,
-            enumerable: true,
-            get() {
-                return get(this[PROXY_STATE], prop)
-            },
-            set(value) {
-                set(this[PROXY_STATE], prop, value)
-            }
-        })
-    )
+function createPropertyProxy(prop, proxiesStack) {
+    // TODO: this is de-optimized version, because we need closure for get function
+    return {
+        configurable: true,
+        enumerable: true,
+        get() {
+            return get(this[PROXY_STATE], prop, proxiesStack)
+        },
+        set(value) {
+            set(this[PROXY_STATE], prop, value)
+        }
+    }
 }
 
 function assertUnfinished(state) {
@@ -109,12 +108,12 @@ function assertUnfinished(state) {
 // this sounds very expensive, but actually it is not that expensive in practice
 // as it will only visit proxies, and only do key-based change detection for objects for
 // which it is not already know that they are changed (that is, only object for which no known key was changed)
-function markChangesSweep() {
+function markChangesSweep(proxiesStack) {
     // intentionally we process the proxies in reverse order;
     // ideally we start by processing leafs in the tree, because if a child has changed, we don't have to check the parent anymore
     // reverse order of proxy creation approximates this
-    for (let i = states.length - 1; i >= 0; i--) {
-        const state = states[i]
+    for (let i = proxiesStack.length - 1; i >= 0; i--) {
+        const state = proxiesStack[i]
         if (state.modified === false) {
             if (Array.isArray(state.base)) {
                 if (hasArrayChanges(state)) markChanged(state)
@@ -190,50 +189,44 @@ function hasArrayChanges(state) {
     return false
 }
 
-export function produceEs5(baseState, producer, patchListener) {
+export function produceEs5(baseState, producer, patchListener, proxiesStack) {
     if (isProxy(baseState)) {
         // See #100, don't nest producers
         const returnValue = producer.call(baseState, baseState)
         return returnValue === undefined ? baseState : returnValue
     }
-    const prevStates = states
-    states = []
     const patches = patchListener && []
     const inversePatches = patchListener && []
-    try {
-        // create proxy for root
-        const rootProxy = createProxy(undefined, baseState)
-        // execute the thunk
-        const returnValue = producer.call(rootProxy, rootProxy)
-        // and finalize the modified proxy
-        each(states, (_, state) => {
-            state.finalizing = true
-        })
-        let result
-        // check whether the draft was modified and/or a value was returned
-        if (returnValue !== undefined && returnValue !== rootProxy) {
-            // something was returned, and it wasn't the proxy itself
-            if (rootProxy[PROXY_STATE].modified)
-                throw new Error(RETURNED_AND_MODIFIED_ERROR)
-            result = finalize(returnValue)
-            if (patches) {
-                patches.push({op: "replace", path: [], value: result})
-                inversePatches.push({op: "replace", path: [], value: baseState})
-            }
-        } else {
-            if (patchListener) markChangesRecursively(rootProxy)
-            markChangesSweep() // this one is more efficient if we don't need to know which attributes have changed
-            result = finalize(rootProxy, [], patches, inversePatches)
+    // create proxy for root
+    const rootProxy = createProxy(undefined, baseState, proxiesStack)
+    // execute the thunk
+    const returnValue = producer.call(rootProxy, rootProxy)
+    // and finalize the modified proxy
+    each(proxiesStack, (_, state) => {
+        state.finalizing = true
+    })
+    let result
+    // check whether the draft was modified and/or a value was returned
+    if (returnValue !== undefined && returnValue !== rootProxy) {
+        // something was returned, and it wasn't the proxy itself
+        if (rootProxy[PROXY_STATE].modified)
+            throw new Error(RETURNED_AND_MODIFIED_ERROR)
+        result = finalize(returnValue)
+        if (patches) {
+            patches.push({op: "replace", path: [], value: result})
+            inversePatches.push({op: "replace", path: [], value: baseState})
         }
-        // make sure all proxies become unusable
-        each(states, (_, state) => {
-            state.finished = true
-        })
-        patchListener && patchListener(patches, inversePatches)
-        return result
-    } finally {
-        states = prevStates
+    } else {
+        if (patchListener) markChangesRecursively(rootProxy)
+        markChangesSweep(proxiesStack) // this one is more efficient if we don't need to know which attributes have changed
+        result = finalize(rootProxy, [], patches, inversePatches)
     }
+    // make sure all proxies become unusable
+    each(proxiesStack, (_, state) => {
+        state.finished = true
+    })
+    patchListener && patchListener(patches, inversePatches)
+    return result
 }
 
 function shallowEqual(objA, objB) {

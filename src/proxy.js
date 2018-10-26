@@ -13,8 +13,6 @@ import {
     each
 } from "./common"
 
-let proxies = null
-
 const objectTraps = {
     get,
     has(target, prop) {
@@ -55,6 +53,16 @@ arrayTraps.set = function(state, prop, value) {
     return objectTraps.set.call(this, state[0], prop, value)
 }
 
+function TMP() {}
+function bindTrapGet(traps, proxiesStack) {
+    TMP.prototype = traps
+    const trapsDelegate = new TMP()
+    trapsDelegate.get = function(state, prop) {
+        return traps.get.call(this, state, prop, proxiesStack)
+    }
+    return trapsDelegate
+}
+
 function createState(parent, base) {
     return {
         modified: false, // this tree is modified (either this object or one of it's children)
@@ -71,20 +79,24 @@ function source(state) {
     return state.modified === true ? state.copy : state.base
 }
 
-function get(state, prop) {
+function get(state, prop, proxiesStack) {
     if (prop === PROXY_STATE) return state
     if (state.modified) {
         const value = state.copy[prop]
         if (value === state.base[prop] && isProxyable(value))
             // only create proxy if it is not yet a proxy, and not a new object
             // (new objects don't need proxying, they will be processed in finalize anyway)
-            return (state.copy[prop] = createProxy(state, value))
+            return (state.copy[prop] = createProxy(state, value, proxiesStack))
         return value
     } else {
         if (has(state.proxies, prop)) return state.proxies[prop]
         const value = state.base[prop]
         if (!isProxy(value) && isProxyable(value))
-            return (state.proxies[prop] = createProxy(state, value))
+            return (state.proxies[prop] = createProxy(
+                state,
+                value,
+                proxiesStack
+            ))
         return value
     }
 }
@@ -140,55 +152,49 @@ function markChanged(state) {
 }
 
 // creates a proxy for plain objects / arrays
-function createProxy(parentState, base) {
+function createProxy(parentState, base, proxiesStack) {
     if (isProxy(base)) throw new Error("Immer bug. Plz report.")
     const state = createState(parentState, base)
     const proxy = Array.isArray(base)
-        ? Proxy.revocable([state], arrayTraps)
-        : Proxy.revocable(state, objectTraps)
-    proxies.push(proxy)
+        ? Proxy.revocable([state], bindTrapGet(arrayTraps, proxiesStack))
+        : Proxy.revocable(state, bindTrapGet(objectTraps, proxiesStack))
+    proxiesStack.push(proxy)
     return proxy.proxy
 }
 
-export function produceProxy(baseState, producer, patchListener) {
+export function produceProxy(baseState, producer, patchListener, proxiesStack) {
     if (isProxy(baseState)) {
         // See #100, don't nest producers
         const returnValue = producer.call(baseState, baseState)
         return returnValue === undefined ? baseState : returnValue
     }
-    const previousProxies = proxies
-    proxies = []
     const patches = patchListener && []
     const inversePatches = patchListener && []
-    try {
-        // create proxy for root
-        const rootProxy = createProxy(undefined, baseState)
-        // execute the thunk
-        const returnValue = producer.call(rootProxy, rootProxy)
-        // and finalize the modified proxy
-        let result
-        // check whether the draft was modified and/or a value was returned
-        if (returnValue !== undefined && returnValue !== rootProxy) {
-            // something was returned, and it wasn't the proxy itself
-            if (rootProxy[PROXY_STATE].modified)
-                throw new Error(RETURNED_AND_MODIFIED_ERROR)
+    // create proxy for root
+    const rootProxy = createProxy(undefined, baseState, proxiesStack)
+    // execute the thunk
+    const returnValue = producer.call(rootProxy, rootProxy)
+    // and finalize the modified proxy
+    let result
+    // check whether the draft was modified and/or a value was returned
+    if (returnValue !== undefined && returnValue !== rootProxy) {
+        // something was returned, and it wasn't the proxy itself
+        if (rootProxy[PROXY_STATE].modified)
+            throw new Error(RETURNED_AND_MODIFIED_ERROR)
 
-            // See #117
-            // Should we just throw when returning a proxy which is not the root, but a subset of the original state?
-            // Looks like a wrongly modeled reducer
-            result = finalize(returnValue)
-            if (patches) {
-                patches.push({op: "replace", path: [], value: result})
-                inversePatches.push({op: "replace", path: [], value: baseState})
-            }
-        } else {
-            result = finalize(rootProxy, [], patches, inversePatches)
+        // See #117
+        // Should we just throw when returning a proxy which is not the root, but a subset of the original state?
+        // Looks like a wrongly modeled reducer
+        result = finalize(returnValue)
+        if (patches) {
+            patches.push({op: "replace", path: [], value: result})
+            inversePatches.push({op: "replace", path: [], value: baseState})
         }
-        // revoke all proxies
-        each(proxies, (_, p) => p.revoke())
-        patchListener && patchListener(patches, inversePatches)
-        return result
-    } finally {
-        proxies = previousProxies
+    } else {
+        result = finalize(rootProxy, [], patches, inversePatches)
     }
+    // revoke all proxies
+    each(proxiesStack, (_, p) => p.revoke())
+    patchListener && patchListener(patches, inversePatches)
+    return result
 }

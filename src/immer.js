@@ -1,4 +1,9 @@
-export {setAutoFreeze, setUseProxies, original, isProxy as isDraft} from "./common"
+export {
+    setAutoFreeze,
+    setUseProxies,
+    original,
+    isProxy as isDraft
+} from "./common"
 
 import {applyPatches as applyPatchesImpl} from "./patches"
 import {isProxyable, getUseProxies, NOTHING} from "./common"
@@ -63,8 +68,8 @@ export function produce(baseState, producer, patchListener) {
         )
     return normalizeResult(
         getUseProxies()
-            ? produceProxy(baseState, producer, patchListener)
-            : produceEs5(baseState, producer, patchListener)
+            ? produceProxy(baseState, producer, patchListener, [])
+            : produceEs5(baseState, producer, patchListener, [])
     )
 }
 
