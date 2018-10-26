@@ -162,12 +162,13 @@ function createProxy(parentState, base, proxiesStack) {
     return proxy.proxy
 }
 
-export function produceProxy(baseState, producer, patchListener, proxiesStack) {
+export function produceProxy(baseState, producer, patchListener) {
     if (isProxy(baseState)) {
         // See #100, don't nest producers
         const returnValue = producer.call(baseState, baseState)
         return returnValue === undefined ? baseState : returnValue
     }
+    const proxiesStack = []
     const patches = patchListener && []
     const inversePatches = patchListener && []
     // create proxy for root

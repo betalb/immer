@@ -68,8 +68,8 @@ export function produce(baseState, producer, patchListener) {
         )
     return normalizeResult(
         getUseProxies()
-            ? produceProxy(baseState, producer, patchListener, [])
-            : produceEs5(baseState, producer, patchListener, [])
+            ? produceProxy(baseState, producer, patchListener)
+            : produceEs5(baseState, producer, patchListener)
     )
 }
 

@@ -31,14 +31,19 @@ function source(state) {
     return state.hasCopy ? state.copy : state.base
 }
 
-function get(state, prop, proxiesStack) {
+function get(state, prop, proxiesStack, descriptors) {
     assertUnfinished(state)
     const value = source(state)[prop]
     if (!state.finalizing && value === state.base[prop] && isProxyable(value)) {
         // only create a proxy if the value is proxyable, and the value was in the base state
         // if it wasn't in the base state, the object is already modified and we will process it in finalize
         prepareCopy(state)
-        return (state.copy[prop] = createProxy(state, value, proxiesStack))
+        return (state.copy[prop] = createProxy(
+            state,
+            value,
+            proxiesStack,
+            descriptors
+        ))
     }
     return value
 }
@@ -68,13 +73,13 @@ function prepareCopy(state) {
 }
 
 // creates a proxy for plain objects / arrays
-function createProxy(parent, base, proxiesStack) {
+function createProxy(parent, base, proxiesStack, descriptors) {
     const proxy = shallowCopy(base)
     each(base, i => {
         Object.defineProperty(
             proxy,
             "" + i,
-            createPropertyProxy("" + i, proxiesStack)
+            createPropertyProxy("" + i, proxiesStack, descriptors)
         )
     })
     const state = createState(parent, proxy, base)
@@ -83,18 +88,20 @@ function createProxy(parent, base, proxiesStack) {
     return proxy
 }
 
-function createPropertyProxy(prop, proxiesStack) {
-    // TODO: this is de-optimized version, because we need closure for get function
-    return {
-        configurable: true,
-        enumerable: true,
-        get() {
-            return get(this[PROXY_STATE], prop, proxiesStack)
-        },
-        set(value) {
-            set(this[PROXY_STATE], prop, value)
-        }
-    }
+function createPropertyProxy(prop, proxiesStack, descriptors) {
+    return (
+        descriptors[prop] ||
+        (descriptors[prop] = {
+            configurable: true,
+            enumerable: true,
+            get() {
+                return get(this[PROXY_STATE], prop, proxiesStack, descriptors)
+            },
+            set(value) {
+                set(this[PROXY_STATE], prop, value)
+            }
+        })
+    )
 }
 
 function assertUnfinished(state) {
@@ -189,16 +196,23 @@ function hasArrayChanges(state) {
     return false
 }
 
-export function produceEs5(baseState, producer, patchListener, proxiesStack) {
+export function produceEs5(baseState, producer, patchListener) {
     if (isProxy(baseState)) {
         // See #100, don't nest producers
         const returnValue = producer.call(baseState, baseState)
         return returnValue === undefined ? baseState : returnValue
     }
+    const proxiesStack = []
+    const descriptors = {}
     const patches = patchListener && []
     const inversePatches = patchListener && []
     // create proxy for root
-    const rootProxy = createProxy(undefined, baseState, proxiesStack)
+    const rootProxy = createProxy(
+        undefined,
+        baseState,
+        proxiesStack,
+        descriptors
+    )
     // execute the thunk
     const returnValue = producer.call(rootProxy, rootProxy)
     // and finalize the modified proxy
